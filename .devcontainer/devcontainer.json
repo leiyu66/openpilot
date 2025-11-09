@@ -4,7 +4,8 @@
   "runArgs": ["--gpus", "all", "--shm-size=2g"],
   "containerEnv": {
     "PYTHONPATH": "/openpilot",
-    "SCALE": "0.80"
+    "SCALE": "0.48",
+    "DISABLE_SOUNDS": "1"
   },
   "remoteUser": "vscode",
   "customizations": {
@@ -17,5 +18,6 @@
       ]
     }
   },
-  "postCreateCommand": "git lfs install && git submodule update --init --recursive && cd third_party/acados && git lfs pull && cd ../.. && pip3 install -e .[testing,dev,tools] && scons -j$(nproc) --minimal"
+  "postCreateCommand": "git lfs install && git submodule update --init --recursive && cd third_party/acados && git lfs pull && cd ../.. && pip3 install -e .[testing,dev,tools] && scons -j$(nproc) --minimal",
+  "postStartCommand": "sudo mkdir -p /etc/OpenCL/vendors && echo 'libnvidia-opencl.so.1' | sudo tee /etc/OpenCL/vendors/nvidia.icd > /dev/null || true"
 }

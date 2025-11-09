@@ -1,4 +1,5 @@
 import math
+import os
 import numpy as np
 import time
 import wave
@@ -8,6 +9,7 @@ from cereal import car, messaging
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import Ratekeeper
+from openpilot.common.params import Params
 from openpilot.common.utils import retry
 from openpilot.common.swaglog import cloudlog
 
@@ -61,6 +63,22 @@ class Soundd:
     self.selfdrive_timeout_alert = False
 
     self.spl_filter_weighted = FirstOrderFilter(0, 2.5, FILTER_DT, initialized=False)
+
+  def silent_thread(self):
+    """Run a silent loop when no audio device is available or sounds are disabled.
+    Keeps the process alive to avoid manager errors, updates alerts/volume logic without output.
+    """
+    sm = messaging.SubMaster(['selfdriveState', 'soundPressure'])
+    rk = Ratekeeper(20)
+    cloudlog.info("soundd running in silent mode (no audio device or disabled)")
+    while True:
+      sm.update(0)
+      # maintain internal state to avoid side effects in other modules
+      if sm.updated['soundPressure'] and self.current_alert == AudibleAlert.none:
+        self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
+        self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
+      self.get_audible_alert(sm)
+      rk.keep_time()
 
   def load_sounds(self):
     self.loaded_sounds: dict[int, np.ndarray] = {}
@@ -124,35 +142,74 @@ class Soundd:
     volume = ((weighted_db - AMBIENT_DB) / DB_SCALE) * (MAX_VOLUME - MIN_VOLUME) + MIN_VOLUME
     return math.pow(10, (np.clip(volume, MIN_VOLUME, MAX_VOLUME) - 1))
 
-  @retry(attempts=10, delay=3)
+  # Legacy (kept for potential future use) retry-decorated method no longer used directly
+  @retry(attempts=3, delay=1)
   def get_stream(self, sd):
-    # reload sounddevice to reinitialize portaudio
+    """Attempt to open PortAudio stream (may raise)."""
     sd._terminate()
     sd._initialize()
     return sd.OutputStream(channels=1, samplerate=SAMPLE_RATE, callback=self.callback, blocksize=SAMPLE_BUFFER)
 
+  def open_stream_or_none(self, sd):
+    """Try to open an audio stream with a few fast attempts; return None on failure.
+
+    We purposefully avoid long blocking retries so that we can fall back to silent
+    mode quickly and keep the manager happy instead of crashing repeatedly.
+    """
+    for attempt in range(3):
+      try:
+        return self.get_stream(sd)
+      except Exception as e:
+        cloudlog.warning(f"soundd stream open attempt {attempt+1} failed: {e}")
+        time.sleep(0.2)
+    return None
+
   def soundd_thread(self):
+    # Optional disable via env/param
+    try:
+      params = Params()
+      disable_sounds = os.getenv("DISABLE_SOUNDS") in ("1", "true", "True") or params.get_bool("DisableSoundd")
+    except Exception:
+      disable_sounds = os.getenv("DISABLE_SOUNDS") in ("1", "true", "True")
+
+    if disable_sounds:
+      return self.silent_thread()
+
+    # Try to open audio device; if it fails, fall back to silent mode (without raising)
     # sounddevice must be imported after forking processes
-    import sounddevice as sd
+    import sounddevice as sd  # pylint: disable=import-error
+
+    stream = self.open_stream_or_none(sd)
+    if stream is None:
+      cloudlog.event("soundd_disabled_no_device", error=True, exception="open_stream_failed")
+      return self.silent_thread()
 
     sm = messaging.SubMaster(['selfdriveState', 'soundPressure'])
+    rk = Ratekeeper(20)
+    msg = " ".join([
+      f"soundd stream started: samplerate={stream.samplerate}",
+      f"channels={stream.channels}",
+      f"dtype={stream.dtype}",
+      f"device={stream.device}",
+      f"blocksize={stream.blocksize}",
+    ])
+    cloudlog.info(msg)
+    try:
+      with stream:
+        while True:
+          sm.update(0)
 
-    with self.get_stream(sd) as stream:
-      rk = Ratekeeper(20)
+          if sm.updated['soundPressure'] and self.current_alert == AudibleAlert.none:  # only update volume filter when not playing alert
+            self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
+            self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
 
-      cloudlog.info(f"soundd stream started: {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
-      while True:
-        sm.update(0)
-
-        if sm.updated['soundPressure'] and self.current_alert == AudibleAlert.none: # only update volume filter when not playing alert
-          self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
-          self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
-
-        self.get_audible_alert(sm)
-
-        rk.keep_time()
-
-        assert stream.active
+          self.get_audible_alert(sm)
+          rk.keep_time()
+          if not stream.active:
+            raise RuntimeError("soundd audio stream inactive")
+    except Exception as e:
+      cloudlog.event("soundd_stream_error_fallback", error=True, exception=str(e))
+      return self.silent_thread()
 
 
 def main():

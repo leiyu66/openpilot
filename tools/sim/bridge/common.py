@@ -15,6 +15,7 @@ from openpilot.selfdrive.test.helpers import set_params_enabled
 from openpilot.tools.sim.lib.common import SimulatorState, World
 from openpilot.tools.sim.lib.simulated_car import SimulatedCar
 from openpilot.tools.sim.lib.simulated_sensors import SimulatedSensors
+from cereal import messaging
 
 QueueMessage = namedtuple("QueueMessage", ["type", "info"], defaults=[None])
 
@@ -23,6 +24,8 @@ class QueueMessageType(Enum):
   CONTROL_COMMAND = 1
   TERMINATION_INFO = 2
   CLOSE_STATUS = 3
+
+WARMUP_FRAMES = 100  # ~1 second at 100Hz to allow all processes to initialize
 
 def control_cmd_gen(cmd: str):
   return QueueMessage(QueueMessageType.CONTROL_COMMAND, cmd)
@@ -41,6 +44,8 @@ class SimulatorBridge(ABC):
     set_params_enabled()
     self.params = Params()
     self.params.put_bool("AlphaLongitudinalEnabled", True)
+    # Set IsOnroad to trigger modeld and other onroad processes to start
+    self.params.put_bool("IsOnroad", True)
 
     self.rk = Ratekeeper(100, None)
 
@@ -60,6 +65,8 @@ class SimulatorBridge(ABC):
     self.startup_button_prev = True
 
     self.test_run = False
+    self.warmup_complete = False
+    self.last_cruise_button_warning = 0
 
   def _on_shutdown(self, signal, frame):
     self.shutdown()
@@ -118,6 +125,9 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
     for _ in range(20):
       self.world.tick()
 
+    # Create SubMaster to monitor system readiness
+    sm_monitor = messaging.SubMaster(['livePose', 'cameraOdometry', 'modelV2'])
+
     while self._keep_alive:
       throttle_out = steer_out = brake_out = 0.0
       throttle_op = steer_op = brake_op = 0.0
@@ -127,6 +137,18 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
       self.simulator_state.right_blinker = False
 
       throttle_manual = steer_manual = brake_manual = 0.
+
+      # Check if warmup is complete and system is ready
+      if self.rk.frame > WARMUP_FRAMES and not self.warmup_complete:
+        sm_monitor.update(0)
+        # Check if critical messages are being received
+        if (sm_monitor.alive['livePose'] and
+            sm_monitor.alive['cameraOdometry'] and
+            sm_monitor.alive['modelV2'] and
+            sm_monitor['livePose'].posenetOK):
+          self.warmup_complete = True
+          print("\n✓ System ready - all processes initialized")
+          print("  You can now press '2' to engage cruise control\n")
 
       # Read manual controls
       if not q.empty():
@@ -140,6 +162,21 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
           elif m[0] == "brake":
             brake_manual = float(m[1])
           elif m[0] == "cruise":
+            # Block cruise commands until warmup is complete
+            if not self.warmup_complete and not self.test_run:
+              # Throttle warning messages to once per second
+              import time
+              current_time = time.monotonic()
+              if current_time - self.last_cruise_button_warning > 1.0:
+                sm_monitor.update(0)
+                print("\n⚠ System initializing... Please wait")
+                print(f"  livePose: {'✓' if sm_monitor.alive.get('livePose') else '✗'}")
+                print(f"  cameraOdometry: {'✓' if sm_monitor.alive.get('cameraOdometry') else '✗'}")
+                print(f"  modelV2: {'✓' if sm_monitor.alive.get('modelV2') else '✗'}")
+                print(f"  posenetOK: {'✓' if sm_monitor.alive.get('livePose') and sm_monitor['livePose'].posenetOK else '✗'}")
+                self.last_cruise_button_warning = current_time
+              continue
+
             if m[1] == "down":
               self.simulator_state.cruise_button = CruiseButtons.DECEL_SET
             elif m[1] == "up":

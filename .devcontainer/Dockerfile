@@ -1,10 +1,15 @@
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 # Set timezone and prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# Install Python 3.11 and basic dependencies
+# Install OpenCL runtime and tools
+RUN apt-get update && apt-get install -y \
+    ocl-icd-libopencl1 clinfo \
+ && rm -rf /var/lib/apt/lists/*
+
+ # Install Python 3.11 and basic dependencies
 RUN apt-get update && apt-get install -y \
     git git-lfs software-properties-common build-essential sudo \
     libgl1-mesa-glx libglib2.0-0 \

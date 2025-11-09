@@ -229,7 +229,10 @@ class LocationEstimator:
 
     old_mean = np.mean(self.posenet_stds[:POSENET_STD_HIST_HALF])
     new_mean = np.mean(self.posenet_stds[POSENET_STD_HIST_HALF:])
-    std_spike = (new_mean / old_mean) > 4.0 and new_mean > 7.0
+    # More lenient spike detection during initialization (when old_mean is still at initial value)
+    is_initializing = old_mean >= POSENET_STD_INITIAL_VALUE * 0.9
+    std_spike_threshold = 8.0 if is_initializing else 4.0
+    std_spike = (new_mean / old_mean) > std_spike_threshold and new_mean > 7.0
 
     livePose.inputsOK = inputs_valid
     livePose.posenetOK = not std_spike or self.car_speed <= 5.0

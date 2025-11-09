@@ -15,10 +15,13 @@ class SimulatedSensors:
   """Simulates the C3 sensors (acc, gyro, gps, peripherals, dm state, cameras) to OpenPilot"""
 
   def __init__(self, dual_camera=False):
-    self.pm = messaging.PubMaster(['accelerometer', 'gyroscope', 'gpsLocationExternal', 'driverStateV2', 'driverMonitoringState', 'peripheralState'])
+    self.pm = messaging.PubMaster(['accelerometer', 'gyroscope', 'gpsLocationExternal', 'driverStateV2',
+                                   'driverMonitoringState', 'peripheralState', 'cameraOdometry', 'modelV2'])
     self.camerad = Camerad(dual_camera=dual_camera)
     self.last_perp_update = 0
     self.last_dmon_update = 0
+    self.last_camera_odometry_update = 0
+    self.last_model_update = 0
 
   def send_imu_message(self, simulator_state: 'SimulatorState'):
     for _ in range(5):
@@ -99,6 +102,24 @@ class SimulatedSensors:
     }
     self.pm.send('driverMonitoringState', dat)
 
+  def send_fake_camera_odometry(self, simulator_state: 'SimulatorState'):
+    """Send fake cameraOdometry messages when modeld is not running (GPU unavailable)"""
+    dat = messaging.new_message('cameraOdometry', valid=True)
+    # Provide stable fake odometry data
+    dat.cameraOdometry.trans = [0.0, 0.0, 0.0]
+    dat.cameraOdometry.rot = [0.0, 0.0, 0.0]
+    dat.cameraOdometry.transStd = [0.1, 0.1, 0.1]
+    dat.cameraOdometry.rotStd = [0.01, 0.01, 0.01]
+    self.pm.send('cameraOdometry', dat)
+  def send_fake_model_v2(self, simulator_state: 'SimulatorState'):
+    """Send fake modelV2 messages when modeld is not running (GPU unavailable)"""
+    dat = messaging.new_message('modelV2', valid=True)
+    # Provide minimal fake model data to satisfy system checks
+    dat.modelV2.frameId = 0
+    dat.modelV2.frameIdExtra = 0
+    self.pm.send('modelV2', dat)
+
+
   def send_camera_images(self, world: 'World'):
     world.image_lock.acquire()
     yuv = self.camerad.rgb_to_yuv(world.road_image)
@@ -116,6 +137,14 @@ class SimulatedSensors:
     if (now - self.last_dmon_update) > DT_DMON/2:
       self.send_fake_driver_monitoring()
       self.last_dmon_update = now
+
+    if (now - self.last_camera_odometry_update) > 0.05:  # 20 Hz
+      self.send_fake_camera_odometry(simulator_state)
+      self.last_camera_odometry_update = now
+    if (now - self.last_model_update) > 0.05:  # 20 Hz
+      self.send_fake_model_v2(simulator_state)
+      self.last_model_update = now
+
 
     if (now - self.last_perp_update) > 0.25:
       self.send_peripheral_state()
