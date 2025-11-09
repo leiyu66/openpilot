@@ -1,0 +1,21 @@
+{
+  "name": "openpilot-sim",
+  "dockerFile": "Dockerfile",
+  "runArgs": ["--gpus", "all", "--shm-size=2g"],
+  "containerEnv": {
+    "PYTHONPATH": "/openpilot",
+    "SCALE": "0.80"
+  },
+  "remoteUser": "vscode",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-vscode.cpptools",
+        "elagil.pre-commit-helper",
+        "charliermarsh.ruff"
+      ]
+    }
+  },
+  "postCreateCommand": "git lfs install && git submodule update --init --recursive && cd third_party/acados && git lfs pull && cd ../.. && pip3 install -e .[testing,dev,tools] && scons -j$(nproc) --minimal"
+}
